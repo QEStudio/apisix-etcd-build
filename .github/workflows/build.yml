@@ -37,11 +37,11 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build etcd (builder stage)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./docker/etcd
           file: ./docker/etcd/Dockerfile
@@ -81,7 +81,7 @@ jobs:
           cd /tmp && tar czf $PKG.tar.gz $PKG && ls -lh $PKG.tar.gz
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}
           path: /tmp/etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}.tar.gz
@@ -100,11 +100,11 @@ jobs:
       fail-fast: false
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build APISIX (builder stage)
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./docker/apisix
           file: ./docker/apisix/Dockerfile
@@ -198,7 +198,7 @@ jobs:
           cd /tmp && tar czf $PKG.tar.gz $PKG && ls -lh $PKG.tar.gz
 
       - name: Upload
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
           path: /tmp/apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}.tar.gz
@@ -212,7 +212,7 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - name: Download etcd amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: etcd-${{ env.ETCD_VERSION }}-linux-amd64
           path: /tmp/test
@@ -234,7 +234,7 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - name: Download APISIX amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apisix-${{ env.APISIX_VERSION }}-linux-amd64
           path: /tmp/test
@@ -260,7 +260,7 @@ jobs:
     if: github.event_name != 'pull_request'
     steps:
       - name: Download APISIX amd64
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apisix-${{ env.APISIX_VERSION }}-linux-amd64
           path: /tmp/test
@@ -288,16 +288,16 @@ jobs:
     runs-on: ${{ matrix.runner }}
     if: github.event_name != 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download etcd ${{ matrix.arch }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}
           path: /tmp/etcd
 
       - name: Download APISIX ${{ matrix.arch }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
           path: /tmp/apisix
@@ -410,7 +410,7 @@ jobs:
           echo "========================================"
 
       - name: Upload bundle (${{ matrix.arch }})
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apisix-etcd-bundle-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
           path: /tmp/apisix-etcd-${{ env.APISIX_VERSION }}-*.tar.gz
@@ -424,11 +424,11 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: /tmp/release
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: /tmp/release/*
           body: "Portable packages for APISIX ${{ env.APISIX_VERSION }} + etcd ${{ env.ETCD_VERSION }}"

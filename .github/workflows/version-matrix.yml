@@ -32,11 +32,11 @@ jobs:
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build APISIX ${{ matrix.apisix_version }} (${{ matrix.arch }})
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./docker/apisix
           file: ./docker/apisix/Dockerfile
@@ -93,7 +93,7 @@ jobs:
           openresty -v || LD_LIBRARY_PATH="$PWD/lib" ./bin/openresty -v
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}
           path: /tmp/apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}.tar.gz
@@ -109,11 +109,11 @@ jobs:
       fail-fast: false
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build etcd ${{ matrix.etcd_version }} (${{ matrix.arch }})
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ./docker/etcd
           file: ./docker/etcd/Dockerfile
@@ -146,7 +146,7 @@ jobs:
           cd /tmp && tar czf $PKG.tar.gz $PKG
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: etcd-${{ matrix.etcd_version }}-linux-${{ matrix.arch }}
           path: /tmp/etcd-${{ matrix.etcd_version }}-linux-${{ matrix.arch }}.tar.gz
