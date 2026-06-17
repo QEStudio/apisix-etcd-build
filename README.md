@@ -19,7 +19,7 @@ Build and run [Apache APISIX](https://apisix.apache.org/) API Gateway with [etcd
 |-----------|---------|
 | Apache APISIX | 3.16.0 |
 | etcd | v3.6.12 |
-| OpenResty | 1.29.2.5 |
+| OpenResty | 1.31.1.1 |
 | Base Image | Debian Bookworm |
 
 ## Quick Start

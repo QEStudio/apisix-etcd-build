@@ -3,7 +3,7 @@
 # Default versions - latest stable
 APISIX_VERSION ?= 3.16.0
 ETCD_VERSION ?= v3.6.12
-OPENRESTY_VERSION ?= 1.29.2.5
+OPENRESTY_VERSION ?= 1.31.1.1
 
 # Docker compose file
 COMPOSE_FILE ?= docker-compose.yml

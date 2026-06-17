@@ -19,7 +19,7 @@
 |------|------|
 | Apache APISIX | 3.16.0 |
 | etcd | v3.6.12 |
-| OpenResty | 1.29.2.5 |
+| OpenResty | 1.31.1.1 |
 | 基础镜像 | Debian Bookworm |
 
 ## 快速开始

@@ -8,7 +8,7 @@
 FROM debian:bookworm-slim AS builder
 
 ARG APISIX_VERSION=3.16.0
-ARG OPENRESTY_VERSION=1.29.2.5
+ARG OPENRESTY_VERSION=1.31.1.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential autoconf automake libtool pkg-config \
@@ -74,7 +74,7 @@ RUN mkdir -p /usr/local/openresty/lib && \
 FROM debian:bookworm-slim AS package
 
 ARG APISIX_VERSION=3.16.0
-ARG OPENRESTY_VERSION=1.29.2.5
+ARG OPENRESTY_VERSION=1.31.1.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates libpcre3 libssl3 zlib1g libyaml-0-2 \
@@ -118,7 +118,7 @@ RUN ls -la /output/apisix-${APISIX_VERSION}/ && ls -la /output/apisix-${APISIX_V
 FROM debian:bookworm-slim AS runtime
 
 ARG APISIX_VERSION=3.16.0
-ARG OPENRESTY_VERSION=1.29.2.5
+ARG OPENRESTY_VERSION=1.31.1.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates lua5.1 libpcre3 libssl3 zlib1g libyaml-0-2 \
