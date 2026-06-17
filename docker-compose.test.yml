@@ -1,0 +1,9 @@
+version: '3.8'
+
+# Override file for CI smoke testing.
+# Overrides the APISIX image with the locally-built runtime image.
+# Usage: docker compose -f docker-compose.standalone.yml -f docker-compose.test.yml up -d
+
+services:
+  apisix:
+    image: apisix-gateway:test

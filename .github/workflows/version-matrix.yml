@@ -1,0 +1,153 @@
+name: Version Matrix Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      apisix_versions:
+        description: 'APISIX versions (comma-separated)'
+        required: false
+        default: '3.14.0,3.15.0,3.16.0'
+      etcd_versions:
+        description: 'etcd versions (comma-separated)'
+        required: false
+        default: 'v3.5.15,v3.6.11,v3.6.12'
+
+env:
+  OPENRESTY_VERSION: 1.29.2.5
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+concurrency:
+  group: version-matrix-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ======================== APISIX Version Matrix ========================
+  build-apisix-matrix:
+    strategy:
+      matrix:
+        apisix_version: ${{ fromJSON(format('[{0}]', github.event.inputs.apisix_versions || '3.14.0,3.15.0,3.16.0')) }}
+        arch:
+          - amd64
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build APISIX ${{ matrix.apisix_version }} (${{ matrix.arch }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/apisix
+          file: ./docker/apisix/Dockerfile
+          target: builder
+          push: false
+          load: true
+          tags: apisix-builder:${{ matrix.apisix_version }}-${{ matrix.arch }}
+          build-args: |
+            APISIX_VERSION=${{ matrix.apisix_version }}
+            OPENRESTY_VERSION=${{ env.OPENRESTY_VERSION }}
+          cache-from: type=gha
+        timeout-minutes: 120
+
+      - name: Extract and package
+        run: |
+          PKG="apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}"
+          mkdir -p /tmp/$PKG
+          docker run -d --name apisix-extract apisix-builder:${{ matrix.apisix_version }}-${{ matrix.arch }} sleep 120
+          docker cp apisix-extract:/usr/local/openresty /tmp/$PKG/openresty
+          mkdir -p /tmp/$PKG/apisix
+          docker cp apisix-extract:/usr/local/apisix/. /tmp/$PKG/apisix/
+          docker rm -f apisix-extract
+
+          mkdir -p /tmp/$PKG/lib
+          for src in /tmp/$PKG/openresty/lib /tmp/$PKG/openresty/luajit/lib; do
+            [ -d "$src" ] && find "$src" -type f -name "*.so*" -exec cp -aL {} /tmp/$PKG/lib/ \; 2>/dev/null || true
+          done
+
+          cd /tmp/$PKG
+          mkdir -p bin
+          ln -sf ../openresty/nginx/sbin/nginx bin/openresty
+          ln -sf ../openresty/bin/resty bin/resty
+
+          cat > bin/apisix << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+          export PATH="$DIR/openresty/bin:$DIR/openresty/nginx/sbin:$DIR/apisix:$PATH"
+          export LD_LIBRARY_PATH="$DIR/lib:$DIR/openresty/luajit/lib:$DIR/openresty/lib:${LD_LIBRARY_PATH:-}"
+          export LUA_PATH="$DIR/apisix/deps/share/lua/5.1/?.lua;$DIR/apisix/deps/share/lua/5.1/?/init.lua;$DIR/apisix/?.lua;$DIR/apisix/?/init.lua;"
+          export LUA_CPATH="$DIR/apisix/deps/lib/lua/5.1/?.so;"
+          cd "$DIR/apisix" && exec ./bin/apisix "$@"
+          SCRIPT
+          chmod +x bin/apisix
+
+          echo "APISIX ${{ matrix.apisix_version }}" > VERSION
+          echo "OpenResty ${{ env.OPENRESTY_VERSION }}" >> VERSION
+          cd /tmp && tar czf $PKG.tar.gz $PKG
+
+      - name: Test OpenResty
+        run: |
+          PKG="apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}"
+          cd /tmp/$PKG
+          source ./set-env.sh 2>/dev/null || true
+          openresty -v || LD_LIBRARY_PATH="$PWD/lib" ./bin/openresty -v
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}
+          path: /tmp/apisix-${{ matrix.apisix_version }}-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 30
+
+  # ======================== etcd Version Matrix ========================
+  build-etcd-matrix:
+    strategy:
+      matrix:
+        etcd_version: ${{ fromJSON(format('[{0}]', github.event.inputs.etcd_versions || 'v3.5.15,v3.6.11,v3.6.12')) }}
+        arch:
+          - amd64
+      fail-fast: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build etcd ${{ matrix.etcd_version }} (${{ matrix.arch }})
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/etcd
+          file: ./docker/etcd/Dockerfile
+          target: builder
+          push: false
+          load: true
+          tags: etcd-builder:${{ matrix.etcd_version }}-${{ matrix.arch }}
+          build-args: ETCD_VERSION=${{ matrix.etcd_version }}
+
+      - name: Extract and test
+        run: |
+          PKG="etcd-${{ matrix.etcd_version }}-linux-${{ matrix.arch }}"
+          mkdir -p /tmp/$PKG/bin
+          id=$(docker create etcd-builder:${{ matrix.etcd_version }}-${{ matrix.arch }})
+          docker cp $id:/build/bin/etcd /tmp/$PKG/bin/etcd
+          docker cp $id:/build/bin/etcdctl /tmp/$PKG/bin/etcdctl
+          docker cp $id:/build/bin/etcdutl /tmp/$PKG/bin/etcdutl
+          docker rm $id
+          chmod +x /tmp/$PKG/bin/*
+
+          /tmp/$PKG/bin/etcdctl version
+          mkdir -p /tmp/etcd-data
+          /tmp/$PKG/bin/etcd --data-dir=/tmp/etcd-data \
+            --listen-client-urls=http://127.0.0.1:2379 \
+            --advertise-client-urls=http://127.0.0.1:2379 &
+          sleep 3
+          /tmp/$PKG/bin/etcdctl endpoint health && echo "[OK] etcd ${{ matrix.etcd_version }} OK"
+          kill %1 2>/dev/null || true
+
+          cd /tmp && tar czf $PKG.tar.gz $PKG
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: etcd-${{ matrix.etcd_version }}-linux-${{ matrix.arch }}
+          path: /tmp/etcd-${{ matrix.etcd_version }}-linux-${{ matrix.arch }}.tar.gz
+          retention-days: 14

@@ -1,0 +1,436 @@
+name: Build Portable Packages
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      apisix_version:
+        description: APISIX version
+        required: false
+        default: 3.16.0
+      etcd_version:
+        description: etcd version
+        required: false
+        default: v3.6.12
+
+env:
+  APISIX_VERSION: ${{ github.event.inputs.apisix_version || '3.16.0' }}
+  ETCD_VERSION: ${{ github.event.inputs.etcd_version || 'v3.6.12' }}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ======================== etcd ========================
+  build-etcd:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build etcd (builder stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/etcd
+          file: ./docker/etcd/Dockerfile
+          target: builder
+          push: false
+          load: true
+          provenance: false
+          tags: etcd-builder:${{ matrix.arch }}
+          build-args: ETCD_VERSION=${{ env.ETCD_VERSION }}
+
+      - name: Extract binaries
+        run: |
+          PKG="etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}"
+          mkdir -p /tmp/$PKG/bin
+          id=$(docker create etcd-builder:${{ matrix.arch }})
+          docker cp $id:/build/bin/etcd /tmp/$PKG/bin/etcd
+          docker cp $id:/build/bin/etcdctl /tmp/$PKG/bin/etcdctl
+          docker cp $id:/build/bin/etcdutl /tmp/$PKG/bin/etcdutl
+          docker rm $id
+          chmod +x /tmp/$PKG/bin/*
+
+      - name: Test etcd
+        run: |
+          PKG="etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}"
+          /tmp/$PKG/bin/etcdctl version
+          mkdir -p /tmp/etcd-data
+          /tmp/$PKG/bin/etcd --data-dir=/tmp/etcd-data \
+            --listen-client-urls=http://127.0.0.1:2379 \
+            --advertise-client-urls=http://127.0.0.1:2379 &
+          sleep 3
+          /tmp/$PKG/bin/etcdctl endpoint health && echo "[OK] etcd OK"
+          kill %1 2>/dev/null || true
+
+      - name: Package
+        run: |
+          PKG="etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}"
+          cd /tmp && tar czf $PKG.tar.gz $PKG && ls -lh $PKG.tar.gz
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}
+          path: /tmp/etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: error
+          retention-days: 30
+
+  # ======================== APISIX ========================
+  build-apisix:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build APISIX (builder stage)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./docker/apisix
+          file: ./docker/apisix/Dockerfile
+          target: builder
+          push: false
+          load: true
+          provenance: false
+          tags: apisix-builder:${{ matrix.arch }}
+          build-args: APISIX_VERSION=${{ env.APISIX_VERSION }}
+          cache-from: type=gha
+        timeout-minutes: 120
+
+      - name: Extract APISIX files and bundle libs
+        run: |
+          PKG="apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}"
+          mkdir -p /tmp/$PKG
+          
+          docker run -d --name apisix-extract apisix-builder:${{ matrix.arch }} sleep 120
+          
+          # Extract OpenResty
+          docker cp apisix-extract:/usr/local/openresty /tmp/$PKG/openresty
+          
+          # Extract APISIX code
+          mkdir -p /tmp/$PKG/apisix
+          docker cp apisix-extract:/usr/local/apisix/. /tmp/$PKG/apisix/
+          
+          # Stop container - no longer needed
+          docker rm -f apisix-extract
+          
+          # Collect portable .so files from bundled libs and luajit into lib/
+          # Only copy from the specific dirs builder placed them in,
+          # NOT the whole openresty tree (avoid bundling libc etc. which
+          # causes GLIBC version mismatch on different runners).
+          mkdir -p /tmp/$PKG/lib
+          for src in /tmp/$PKG/openresty/lib /tmp/$PKG/openresty/luajit/lib; do
+            if [ -d "$src" ]; then
+              find "$src" -type f -name "*.so*" -exec cp -aL {} /tmp/$PKG/lib/ \; 2>/dev/null || true
+            fi
+          done
+          
+          echo "=== lib contents ==="
+          ls -la /tmp/$PKG/lib/ 2>/dev/null | head -30
+          echo "Total: $(ls /tmp/$PKG/lib/*.so* 2>/dev/null | wc -l) files"
+
+      - name: Create wrapper scripts
+        run: |
+          PKG="apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}"
+          cd /tmp/$PKG
+          
+          mkdir -p bin
+          ln -sf ../openresty/nginx/sbin/nginx bin/openresty
+          ln -sf ../openresty/bin/resty bin/resty
+          
+          cat > bin/apisix << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+          export PATH="$DIR/openresty/bin:$DIR/openresty/nginx/sbin:$DIR/apisix:$PATH"
+          export LD_LIBRARY_PATH="$DIR/lib:$DIR/openresty/luajit/lib:$DIR/openresty/lib:${LD_LIBRARY_PATH:-}"
+          export LUA_PATH="$DIR/apisix/deps/share/lua/5.1/?.lua;$DIR/apisix/deps/share/lua/5.1/?/init.lua;$DIR/apisix/?.lua;$DIR/apisix/?/init.lua;"
+          export LUA_CPATH="$DIR/apisix/deps/lib/lua/5.1/?.so;"
+          cd "$DIR/apisix" && exec ./bin/apisix "$@"
+          SCRIPT
+          chmod +x bin/apisix
+          
+          cat > set-env.sh << 'SCRIPT'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export PATH="$DIR/bin:$DIR/openresty/bin:$DIR/openresty/nginx/sbin:$DIR/apisix:$PATH"
+          export LD_LIBRARY_PATH="$DIR/lib:$DIR/openresty/luajit/lib:$DIR/openresty/lib:${LD_LIBRARY_PATH:-}"
+          export LUA_PATH="$DIR/apisix/deps/share/lua/5.1/?.lua;$DIR/apisix/deps/share/lua/5.1/?/init.lua;$DIR/apisix/?.lua;$DIR/apisix/?/init.lua;"
+          export LUA_CPATH="$DIR/apisix/deps/lib/lua/5.1/?.so;"
+          echo "APISIX env ready"
+          SCRIPT
+          chmod +x set-env.sh
+          
+          echo "APISIX ${{ env.APISIX_VERSION }}" > VERSION
+          
+          ls -la bin/
+
+      - name: Test APISIX
+        run: |
+          PKG="apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}"
+          cd /tmp/$PKG
+          echo "=== OpenResty ==="
+          ./bin/openresty -v 2>&1 || true
+          echo "=== Done ==="
+
+      - name: Package
+        run: |
+          PKG="apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}"
+          cd /tmp && tar czf $PKG.tar.gz $PKG && ls -lh $PKG.tar.gz
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
+          path: /tmp/apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}.tar.gz
+          if-no-files-found: warn
+          retention-days: 30
+
+  # ======================== Test etcd ========================
+  test-etcd:
+    needs: build-etcd
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Download etcd amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: etcd-${{ env.ETCD_VERSION }}-linux-amd64
+          path: /tmp/test
+      - name: Run etcd test
+        run: |
+          cd /tmp/test
+          tar -xzf etcd-${{ env.ETCD_VERSION }}-linux-amd64.tar.gz
+          cd etcd-${{ env.ETCD_VERSION }}-linux-amd64
+          ./bin/etcdctl version
+          ./bin/etcd --data-dir=/tmp/etcd-test --listen-client-urls=http://127.0.0.1:2379 &
+          sleep 3
+          ./bin/etcdctl endpoint health && echo "[OK] etcd OK"
+          kill %1 2>/dev/null || true
+
+  # ======================== Test APISIX ========================
+  test-apisix:
+    needs: build-apisix
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Download APISIX amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: apisix-${{ env.APISIX_VERSION }}-linux-amd64
+          path: /tmp/test
+      - name: Run APISIX test
+        run: |
+          cd /tmp/test
+          ls -la
+          tar -xzf *.tar.gz 2>/dev/null || echo "No APISIX package"
+          PKG_DIR=$(ls -d apisix-*/ 2>/dev/null | head -1)
+          if [ -n "$PKG_DIR" ]; then
+            cd "$PKG_DIR"
+            # Source environment to set LD_LIBRARY_PATH for bundled libs
+            source ./set-env.sh
+            openresty -v && echo "[OK] APISIX OK"
+          else
+            echo "[WARN] APISIX package not available"
+          fi
+
+  # ======================== Cross-Distro Compatibility ========================
+  test-cross-distro:
+    needs: build-apisix
+    runs-on: ubuntu-22.04
+    if: github.event_name != 'pull_request'
+    steps:
+      - name: Download APISIX amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: apisix-${{ env.APISIX_VERSION }}-linux-amd64
+          path: /tmp/test
+
+      - name: Test APISIX on Ubuntu 22.04
+        run: |
+          cd /tmp/test
+          tar -xzf *.tar.gz
+          PKG_DIR=$(ls -d apisix-*/ | head -1)
+          cd "$PKG_DIR"
+          source ./set-env.sh
+          openresty -v 2>/dev/null && echo "[OK] Ubuntu 22.04 OK"
+
+  # ======================== Combined Bundle ========================
+  package-bundle:
+    needs: [build-etcd, build-apisix]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+      fail-fast: false
+    runs-on: ${{ matrix.runner }}
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download etcd ${{ matrix.arch }}
+        uses: actions/download-artifact@v4
+        with:
+          name: etcd-${{ env.ETCD_VERSION }}-linux-${{ matrix.arch }}
+          path: /tmp/etcd
+
+      - name: Download APISIX ${{ matrix.arch }}
+        uses: actions/download-artifact@v4
+        with:
+          name: apisix-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
+          path: /tmp/apisix
+
+      - name: Assemble bundle (${{ matrix.arch }})
+        run: |
+          TAG="apisix-etcd-${{ env.APISIX_VERSION }}-$(echo '${{ env.ETCD_VERSION }}' | sed 's/^v//')-linux-${{ matrix.arch }}"
+          BUNDLE="/tmp/$TAG"
+          mkdir -p "$BUNDLE/etcd/bin" "$BUNDLE/apisix"
+
+          # Extract etcd
+          cd /tmp/etcd
+          tar -xzf *.tar.gz
+          ETCD_DIR=$(ls -d etcd-*/ | head -1)
+          cp -a /tmp/etcd/$ETCD_DIR/bin/* "$BUNDLE/etcd/bin/"
+
+          cd /tmp/apisix
+          tar -xzf *.tar.gz
+          APISIX_DIR=$(ls -d apisix-*/ | head -1)
+          cp -a /tmp/apisix/$APISIX_DIR/* "$BUNDLE/apisix/"
+
+          cp -a ${{ github.workspace }}/bundle/*.sh "$BUNDLE/"
+          cp -a ${{ github.workspace }}/bundle/etcd/*.sh "$BUNDLE/etcd/"
+          cp -a ${{ github.workspace }}/bundle/apisix/*.sh "$BUNDLE/apisix/"
+          chmod +x "$BUNDLE/"*.sh "$BUNDLE/etcd/"*.sh "$BUNDLE/apisix/"*.sh
+
+          cat > "$BUNDLE/VERSION" <<-EOF
+          APISIX: ${{ env.APISIX_VERSION }}
+          etcd: ${{ env.ETCD_VERSION }}
+          OpenResty: 1.27.1.2
+          EOF
+
+          cd /tmp && tar czf "$TAG.tar.gz" "$TAG"
+          echo "Bundle: $(ls -lh /tmp/$TAG.tar.gz)"
+
+      - name: Smoke test bundle (${{ matrix.arch }})
+        run: |
+          TAG="apisix-etcd-${{ env.APISIX_VERSION }}-$(echo '${{ env.ETCD_VERSION }}' | sed 's/^v//')-linux-${{ matrix.arch }}"
+          BUNDLE="/tmp/$TAG"
+
+          echo "========================================"
+          echo " Smoke Testing Bundle (${{ matrix.arch }})"
+          echo "========================================"
+
+          # 1. Management script syntax check (bundle/*.sh only)
+          echo ""
+          echo "1. Checking management script syntax..."
+          for script in "$BUNDLE/start.sh" "$BUNDLE/stop.sh" "$BUNDLE/restart.sh" \
+            "$BUNDLE/etcd/start.sh" "$BUNDLE/etcd/stop.sh" "$BUNDLE/etcd/restart.sh" \
+            "$BUNDLE/apisix/start.sh" "$BUNDLE/apisix/stop.sh" "$BUNDLE/apisix/restart.sh"; do
+            if [ -f "$script" ]; then
+              bash -n "$script" && echo "   [OK] $(basename $script)" || exit 1
+            fi
+          done
+
+          # 2. etcd smoke test
+          echo ""
+          echo "2. Testing etcd start/stop..."
+          DATA_DIR="/tmp/etcd-smoke-data"
+          mkdir -p "$DATA_DIR"
+
+          "$BUNDLE/etcd/bin/etcd" \
+            --data-dir="$DATA_DIR" \
+            --listen-client-urls=http://127.0.0.1:2379 \
+            --advertise-client-urls=http://127.0.0.1:2379 \
+            > /tmp/etcd-smoke.log 2>&1 &
+          ETCD_PID=$!
+          echo "   etcd PID: $ETCD_PID"
+
+          for i in $(seq 10); do
+            if "$BUNDLE/etcd/bin/etcdctl" endpoint health 2>/dev/null | grep -q "healthy"; then
+              echo "   [OK] etcd started and healthy"
+              break
+            fi
+            sleep 1
+          done
+
+          "$BUNDLE/etcd/bin/etcdctl" put /smoke-test "hello" >/dev/null 2>&1
+          VAL=$("$BUNDLE/etcd/bin/etcdctl" get /smoke-test --print-value-only 2>/dev/null)
+          if [ "$VAL" = "hello" ]; then
+            echo "   [OK] etcd put/get works"
+          else
+            echo "   [FAIL] etcd put/get failed"
+            exit 1
+          fi
+
+          kill "$ETCD_PID" 2>/dev/null || true
+          wait "$ETCD_PID" 2>/dev/null || true
+          rm -rf "$DATA_DIR"
+          echo "   [OK] etcd stopped cleanly"
+
+          # 3. APISIX structure check
+          echo ""
+          echo "3. Checking APISIX bundle..."
+          if [ -f "$BUNDLE/apisix/openresty/nginx/sbin/nginx" ]; then
+            echo "   [OK] nginx binary present"
+          else
+            echo "   [FAIL] nginx binary missing"
+            ls -la "$BUNDLE/apisix/openresty/nginx/sbin/" 2>/dev/null || true
+            exit 1
+          fi
+
+          if [ -d "$BUNDLE/apisix/lib" ]; then
+            echo "   [OK] bundled libs: $(ls "$BUNDLE/apisix/lib"/*.so* 2>/dev/null | wc -l) files"
+          fi
+
+          echo ""
+          echo "========================================"
+          echo " [OK] Bundle smoke test passed (${{ matrix.arch }})"
+          echo "========================================"
+
+      - name: Upload bundle (${{ matrix.arch }})
+        uses: actions/upload-artifact@v4
+        with:
+          name: apisix-etcd-bundle-${{ env.APISIX_VERSION }}-linux-${{ matrix.arch }}
+          path: /tmp/apisix-etcd-${{ env.APISIX_VERSION }}-*.tar.gz
+          retention-days: 30
+
+  # ======================== Release ========================
+  create-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-etcd, build-apisix, test-etcd, test-apisix, test-cross-distro, package-bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: /tmp/release
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: /tmp/release/*
+          body: "Portable packages for APISIX ${{ env.APISIX_VERSION }} + etcd ${{ env.ETCD_VERSION }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  # etcd service
+  etcd:
+    build:
+      context: ./docker/etcd
+      args:
+        ETCD_VERSION: v3.6.12
+    image: apisix-etcd:v3.6.12
+    container_name: apisix-etcd
+    hostname: etcd
+    restart: unless-stopped
+    ports:
+      - "2379:2379"
+      - "2380:2380"
+    environment:
+      - ETCD_NAME=etcd0
+      - ETCD_INITIAL_ADVERTISE_PEER_URLS=http://etcd:2380
+      - ETCD_LISTEN_PEER_URLS=http://0.0.0.0:2380
+      - ETCD_LISTEN_CLIENT_URLS=http://0.0.0.0:2379
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ETCD_INITIAL_CLUSTER=etcd0=http://etcd:2380
+      - ETCD_INITIAL_CLUSTER_TOKEN=etcd-cluster
+      - ETCD_INITIAL_CLUSTER_STATE=new
+    volumes:
+      - etcd-data:/etcd-data
+    networks:
+      - apisix-network
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # APISIX service
+  apisix:
+    build:
+      context: ./docker/apisix
+      args:
+        APISIX_VERSION: 3.16.0
+    image: apisix-gateway:3.16.0
+    container_name: apisix-gateway
+    hostname: apisix
+    restart: unless-stopped
+    depends_on:
+      etcd:
+        condition: service_healthy
+    ports:
+      - "9080:9080"   # HTTP
+      - "9443:9443"   # HTTPS
+      - "9090:9090"   # Admin API
+    environment:
+      - APISIX_STAND_ALONE=false
+      - APISIX_DEPLOYMENT_ETCD_HOST=http://etcd:2379
+    volumes:
+      - ./config/apisix/config.yaml:/usr/local/apisix/conf/config.yaml:ro
+      - ./config/apisix/config-default.yaml:/usr/local/apisix/conf/config-default.yaml:ro
+      - apisix-logs:/usr/local/apisix/logs
+    networks:
+      - apisix-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9090/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  apisix-network:
+    driver: bridge
+    name: apisix-network
+
+volumes:
+  etcd-data:
+    name: apisix-etcd-data
+  apisix-logs:
+    name: apisix-logs
